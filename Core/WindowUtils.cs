@@ -1,5 +1,7 @@
 ﻿using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
+using FlaUI.Core.Input;
+using FlaUI.Core.WindowsAPI;
 using FlaUI.UIA3;
 using SteamAuth;
 using System;
@@ -32,16 +34,6 @@ namespace SAM.Core
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, int wParam, IntPtr lParam);
 
-        [return: MarshalAs(UnmanagedType.Bool)]
-        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-
-        [DllImport("user32.dll", EntryPoint = "PostMessageA")]
-        public static extern bool PostMessage(IntPtr hWnd, uint msg, int wParam, IntPtr lParam);
-
-        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, uint dwExtraInfo);
-
         delegate bool EnumThreadDelegate(IntPtr hWnd, IntPtr lParam);
 
         [DllImport("user32.dll")]
@@ -51,14 +43,7 @@ namespace SAM.Core
 
         public const int WM_GETTEXT = 0xD;
         public const int WM_GETTEXTLENGTH = 0xE;
-        public const int WM_KEYDOWN = 0x0100;
-        public const int WM_KEYUP = 0x0101;
-        public const int WM_CHAR = 0x0102;
-        public const int VK_RETURN = 0x0D;
-        public const int VK_TAB = 0x09;
-        public const int VK_SPACE = 0x20;
 
-        readonly static char[] specialChars = { '{', '}', '(', ')', '[', ']', '+', '^', '%', '~' };
         private static bool loginAllCancelled = false;
 
         private static IEnumerable<IntPtr> EnumerateProcessWindowHandles(Process process)
@@ -223,44 +208,6 @@ namespace SAM.Core
             return false;
         }
 
-        public static WindowHandle GetLegacySteamLoginWindow()
-        {
-            return TopLevelWindowUtils.FindWindow(wh =>
-            wh.GetClassName().Equals("vguiPopupWindow") &&
-            ((wh.GetWindowText().Contains("Steam") &&
-            !wh.GetWindowText().Contains("-") &&
-            !wh.GetWindowText().Contains("—") &&
-             wh.GetWindowText().Length > 5) ||
-             wh.GetWindowText().Equals("蒸汽平台登录")));
-        }
-
-        public static WindowHandle GetLegacySteamGuardWindow()
-        {
-            // Also checking for vguiPopupWindow class name to avoid catching things like browser tabs.
-            WindowHandle windowHandle = TopLevelWindowUtils.FindWindow(wh =>
-            wh.GetClassName().Equals("vguiPopupWindow") &&
-            (wh.GetWindowText().StartsWith("Steam Guard") ||
-             wh.GetWindowText().StartsWith("Steam 令牌") ||
-             wh.GetWindowText().StartsWith("Steam ガード")));
-            return windowHandle;
-        }
-
-        public static WindowHandle GetLegacySteamWarningWindow()
-        {
-            return TopLevelWindowUtils.FindWindow(wh =>
-            wh.GetClassName().Equals("vguiPopupWindow") &&
-            (wh.GetWindowText().StartsWith("Steam - ") ||
-             wh.GetWindowText().StartsWith("Steam — ")));
-        }
-
-        public static WindowHandle GetLegacyMainSteamClientWindow()
-        {
-            return TopLevelWindowUtils.FindWindow(wh =>
-            wh.GetClassName().Equals("vguiPopupWindow") &&
-            (wh.GetWindowText().Equals("Steam") ||
-            wh.GetWindowText().Equals("蒸汽平台")));
-        }
-
         public static LoginWindowState GetLoginWindowState(WindowHandle loginWindow)
         {
             if (!loginWindow.IsValid)
@@ -282,7 +229,7 @@ namespace SAM.Core
                     window.Focus();
 
                     AutomationElement document = window.FindFirstDescendant(e => e.ByControlType(ControlType.Document));
-                    AutomationElement[] children = document.FindAllChildren(); 
+                    AutomationElement[] children = document.FindAllChildren();
 
                     if (children.Length == 0)
                     {
@@ -320,6 +267,8 @@ namespace SAM.Core
                         }
                     }
 
+                    Console.WriteLine("Inputs: " + inputs.Count + " Buttons: " + buttons.Count + " Groups: " + groups.Count + " Images: " + images.Count + " Texts: " + texts.Count);
+
                     if (inputs.Count == 0 && images.Count == 1 && buttons.Count == 2 && texts.Count > 0)
                     {
                         foreach (var text in texts)
@@ -332,17 +281,21 @@ namespace SAM.Core
                             }
                         }
                     }
-                    if (inputs.Count == 0 && images.Count == 0 && buttons.Count == 1)
+                    if (texts.Count == 2 && images.Count == 1 && buttons.Count == 1)
                     {
                         return LoginWindowState.Error;
                     }
-                    else if (inputs.Count == 0 && images.Count >= 2 && buttons.Count > 0)
+                    else if (inputs.Count == 0 && images.Count >= 2 && buttons.Count > 0 && texts.Count == 0)
                     {
                         return LoginWindowState.Selection;
                     }
-                    else if (inputs.Count == 5)
+                    else if (inputs.Count == 0 && buttons.Count == 5 && groups.Count == 0 && images.Count == 3 && texts.Count == 5)
                     {
                         return LoginWindowState.Code;
+                    }
+                    else if (inputs.Count == 0 && buttons.Count == 0 && groups.Count == 0 && images.Count == 3 && texts.Count == 7)
+                    {
+                        return LoginWindowState.MobileConfirmation;
                     }
                     else if (inputs.Count == 2 && buttons.Count == 1)
                     {
@@ -379,6 +332,51 @@ namespace SAM.Core
                 catch (Exception e)
                 {
                     Console.WriteLine(e.Message);
+                }
+            }
+
+            return LoginWindowState.Invalid;
+        }
+
+        public static LoginWindowState TryMobileToCodeSwitch(WindowHandle loginWindow)
+        {
+            using (var automation = new UIA3Automation())
+            {
+                try
+                {
+                    AutomationElement window = automation.FromHandle(loginWindow.RawPtr);
+
+                    window.Focus();
+
+                    AutomationElement document = window.FindFirstDescendant(e => e.ByControlType(ControlType.Document));
+                    AutomationElement[] children = document.FindAllChildren();
+
+                    var texts = new List<AutomationElement>();
+
+                    foreach (AutomationElement element in children)
+                    {
+                        switch (element.ControlType)
+                        {
+                            case ControlType.Text:
+                                texts.Add(element);
+                                break;
+                        }
+                    }
+
+                // Look for "Enter a code instead" text to click
+                foreach (var text in texts)
+                {
+                    if (text.Name.ToLower().Contains("enter a code instead"))
+                    {
+                        text.AsButton().Invoke();
+                        return LoginWindowState.Code;
+                    }
+                }
+
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine("Error switching from mobile confirmation to code entry: " + e.Message);
                 }
             }
 
@@ -430,15 +428,15 @@ namespace SAM.Core
                         passwordBox.WaitUntilEnabled();
                         passwordBox.Text = password;
 
-                        Button checkBoxButton = groups[0].AsButton();
-                        bool isChecked = checkBoxButton.FindFirstChild(e => e.ByControlType(ControlType.Image)) != null;
+                        //Button checkBoxButton = groups[0].AsButton();
+                        //bool isChecked = checkBoxButton.FindFirstChild(e => e.ByControlType(ControlType.Image)) != null;
 
-                        if (remember != isChecked)
-                        {
-                            checkBoxButton.Focus();
-                            checkBoxButton.WaitUntilEnabled();
-                            checkBoxButton.Invoke();
-                        }
+                        //if (remember != isChecked)
+                        //{
+                        //    checkBoxButton.Focus();
+                        //    checkBoxButton.WaitUntilEnabled();
+                        //    checkBoxButton.Invoke();
+                        //}
 
                         signInButton.Focus();
                         signInButton.WaitUntilEnabled();
@@ -467,21 +465,22 @@ namespace SAM.Core
                     window.Focus();
 
                     AutomationElement document = window.FindFirstDescendant(e => e.ByControlType(ControlType.Document));
-                    AutomationElement[] inputs = document.FindAllChildren(e => e.ByControlType(ControlType.Edit));
+                    AutomationElement[] buttons = document.FindAllChildren(e => e.ByControlType(ControlType.Button));
 
                     string code = Generate2FACode(secret);
 
                     try
                     {
-                        for (int i = 0; i < inputs.Length; i++)
+                        for (int i = 0; i < buttons.Length; i++)
                         {
-                            TextBox textBox = inputs[i].AsTextBox();
-                            textBox.Text = code[i].ToString();
+                            buttons[i].AsButton().Invoke();
+                            Keyboard.Type(code[i]);
+                            WaitForChildEdit(buttons[i]);
                         }
                     }
-                    catch (Exception e)
+                    catch (Exception em)
                     {
-                        Console.WriteLine(e.Message);
+                        Console.WriteLine(em.Message);
                         return LoginWindowState.Code;
                     }
 
@@ -494,6 +493,22 @@ namespace SAM.Core
             }
 
             return LoginWindowState.Invalid;
+        }
+
+        public static AutomationElement WaitForChildEdit(AutomationElement parent, int timeoutMs = 500, int intervalMs = 10)
+        {
+            var stopwatch = Stopwatch.StartNew();
+
+            while (stopwatch.ElapsedMilliseconds < timeoutMs)
+            {
+                var textBox = parent.FindFirstChild(cf => cf.ByControlType(ControlType.Text));
+                if (textBox != null && !string.IsNullOrEmpty(textBox.AsTextBox().Name))
+                    return textBox;
+
+                Thread.Sleep(intervalMs);
+            }
+
+            return null;
         }
 
         public static Process WaitForSteamProcess(WindowHandle windowHandle)
@@ -569,129 +584,9 @@ namespace SAM.Core
             loginAllCancelled = true;
         }
 
-        /**
-         * Because CapsLock is handled by system directly, thus sending
-         * it to one particular window is invalid - a window could not
-         * respond to CapsLock, only the system can.
-         * 
-         * For this reason, I break into a low-level API, which may cause
-         * an inconsistency to the original `SendWait` method.
-         * 
-         * https://docs.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-keybd_event
-         */
-        public static void SendCapsLockGlobally()
-        {
-            // Press key down
-            keybd_event((byte)System.Windows.Forms.Keys.CapsLock, 0, 0, 0);
-            // Press key up
-            keybd_event((byte)System.Windows.Forms.Keys.CapsLock, 0, 0x2, 0);
-        }
-
-        public static void SendCharacter(IntPtr hwnd, VirtualInputMethod inputMethod, char c)
-        {
-            switch (inputMethod)
-            {
-                case VirtualInputMethod.SendMessage:
-                    SendMessage(hwnd, WM_CHAR, c, IntPtr.Zero);
-                    break;
-
-                case VirtualInputMethod.PostMessage:
-                    PostMessage(hwnd, WM_CHAR, (IntPtr)c, IntPtr.Zero);
-                    break;
-
-                default:
-                    if (IsSpecialCharacter(c))
-                    {
-                        if (inputMethod == VirtualInputMethod.SendWait)
-                        {
-                            System.Windows.Forms.SendKeys.SendWait("{" + c.ToString() + "}");
-                        }
-                        else
-                        {
-                            System.Windows.Forms.SendKeys.Send("{" + c.ToString() + "}");
-                        }
-                    }
-                    else
-                    {
-                        if (inputMethod == VirtualInputMethod.SendWait)
-                        {
-                            System.Windows.Forms.SendKeys.SendWait(c.ToString());
-                        }
-                        else
-                        {
-                            System.Windows.Forms.SendKeys.Send(c.ToString());
-                        }
-                    }
-                    break;
-            }
-        }
-
-        public static void SendEnter(IntPtr hwnd, VirtualInputMethod inputMethod)
-        {
-            switch (inputMethod)
-            {
-                case VirtualInputMethod.SendMessage:
-                    SendMessage(hwnd, WM_KEYDOWN, VK_RETURN, IntPtr.Zero);
-                    SendMessage(hwnd, WM_KEYUP, VK_RETURN, IntPtr.Zero);
-                    break;
-
-                case VirtualInputMethod.PostMessage:
-                    PostMessage(hwnd, WM_KEYDOWN, VK_RETURN, IntPtr.Zero);
-                    PostMessage(hwnd, WM_KEYUP, VK_RETURN, IntPtr.Zero);
-                    break;
-
-                case VirtualInputMethod.SendWait:
-                    SetForegroundWindow(hwnd);
-                    System.Windows.Forms.SendKeys.SendWait("{ENTER}");
-                    break;
-            }
-        }
-
-        public static void SendTab(IntPtr hwnd, VirtualInputMethod inputMethod)
-        {
-            switch (inputMethod)
-            {
-                case VirtualInputMethod.SendMessage:
-                    SendMessage(hwnd, WM_KEYDOWN, VK_TAB, IntPtr.Zero);
-                    SendMessage(hwnd, WM_KEYUP, VK_TAB, IntPtr.Zero);
-                    break;
-
-                case VirtualInputMethod.PostMessage:
-                    PostMessage(hwnd, WM_KEYDOWN, (IntPtr)VK_TAB, IntPtr.Zero);
-                    PostMessage(hwnd, WM_KEYUP, (IntPtr)VK_TAB, IntPtr.Zero);
-                    break;
-
-                case VirtualInputMethod.SendWait:
-                    SetForegroundWindow(hwnd);
-                    System.Windows.Forms.SendKeys.SendWait("{TAB}");
-                    break;
-            }
-        }
-
-        public static void SendSpace(IntPtr hwnd, VirtualInputMethod inputMethod)
-        {
-            switch (inputMethod)
-            {
-                case VirtualInputMethod.SendMessage:
-                    SendMessage(hwnd, WM_KEYDOWN, VK_SPACE, IntPtr.Zero);
-                    SendMessage(hwnd, WM_KEYUP, VK_SPACE, IntPtr.Zero);
-                    break;
-
-                case VirtualInputMethod.PostMessage:
-                    PostMessage(hwnd, WM_KEYDOWN, (IntPtr)VK_SPACE, IntPtr.Zero);
-                    PostMessage(hwnd, WM_KEYUP, (IntPtr)VK_SPACE, IntPtr.Zero);
-                    break;
-
-                case VirtualInputMethod.SendWait:
-                    SetForegroundWindow(hwnd);
-                    System.Windows.Forms.SendKeys.SendWait(" ");
-                    break;
-            }
-        }
-
         public static void ClearSteamUserDataFolder(string steamPath, int sleepTime, int maxRetry)
         {
-            WindowHandle steamLoginWindow = GetLegacySteamLoginWindow();
+            WindowHandle steamLoginWindow = GetSteamLoginWindow();
             int waitCount = 0;
 
             while (steamLoginWindow.IsValid && waitCount < maxRetry)
@@ -714,24 +609,29 @@ namespace SAM.Core
             }
         }
 
-        public static bool IsSpecialCharacter(char c)
-        {
-            foreach (char special in specialChars)
-            {
-                if (c.Equals(special))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
         public static string Generate2FACode(string shared_secret)
         {
             SteamGuardAccount authAccount = new SteamGuardAccount { SharedSecret = shared_secret };
             string code = authAccount.GenerateSteamGuardCode();
             return code;
+        }
+
+        public static void SetClipboardTextSTA(string text)
+        {
+            var thread = new Thread(() => Clipboard.SetText(text));
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+            thread.Join();
+        }
+
+        public static IDataObject GetClipboardDataObjectSTA()
+        {
+            IDataObject data = null;
+            var thread = new Thread(() => { data = Clipboard.GetDataObject(); });
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+            thread.Join();
+            return data;
         }
     }
 }
